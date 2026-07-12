@@ -23,7 +23,20 @@ jobs:
 
           git remote add upstream https://github.com/actions/runner
           git fetch upstream
-          git merge --no-edit upstream/main
+          if ! git merge --no-edit upstream/main; then
+            # The fork deletes upstream's own CI/CD workflows and ships its own.
+            # Git re-raises a modify/delete conflict every time upstream edits one
+            # of those deleted files, so auto-resolve them by keeping the deletion.
+            git status --porcelain | awk '$1 == "DU" { print $2 }' | xargs -r git rm
+            # Anything still unmerged is a real content conflict (e.g. upstream
+            # touched a patched source file) and needs a human to re-apply the patch.
+            if git ls-files -u | grep -q .; then
+              echo "::error::Content conflicts after auto-resolving deletions; re-apply fork patches manually"
+              git merge --abort
+              exit 1
+            fi
+            git commit --no-edit
+          fi
           git push origin main
 
   check:
