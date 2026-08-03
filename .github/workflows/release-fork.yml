@@ -1,6 +1,12 @@
 name: Runner CD
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/release-fork.yml'
+      - 'images/**'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0' # Every Sunday at midnight UTC
@@ -21,7 +27,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git remote add upstream https://github.com/actions/runner
+          git remote add upstream https://github.com/falcondev-oss/github-actions-runner
           git fetch upstream
           if ! git merge --no-edit upstream/main; then
             # The fork deletes upstream's own CI/CD workflows and ships its own.
@@ -55,7 +61,7 @@ jobs:
         id: check_version
         uses: actions/github-script@v9
         with:
-          github-token: ${{secrets.GH_TOKEN}}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const latestRelease = await github.rest.repos.getLatestRelease({
               owner: 'actions',
@@ -163,9 +169,9 @@ jobs:
         name: Install Dependencies for SHA Calculation (osx)
       - run: |
           file=$(ls)
-          sha=$(sha256sum $file | awk '{ print $1 }')
+          sha=$(sha256sum "$file" | awk '{ print $1 }')
           echo "Computed sha256: $sha for $file"
-          echo "${{matrix.runtime}}-sha256=$sha" >> $GITHUB_OUTPUT
+          echo "${{matrix.runtime}}-sha256=$sha" >> "$GITHUB_OUTPUT"
         shell: bash
         id: sha
         name: Compute SHA256
@@ -183,6 +189,8 @@ jobs:
   release:
     needs: [build, check]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
 
@@ -234,90 +242,25 @@ jobs:
           echo "${{needs.build.outputs.linux-arm-sha}}  actions-runner-linux-arm-${{ needs.check.outputs.version }}.tar.gz" | shasum -a 256 -c
           echo "${{needs.build.outputs.linux-arm64-sha}}  actions-runner-linux-arm64-${{ needs.check.outputs.version }}.tar.gz" | shasum -a 256 -c
 
-      # Create GitHub release
-      - uses: actions/create-release@master
-        id: createRelease
-        name: Create ${{ needs.check.outputs.version }} Runner Release
+      - name: Create ${{ needs.check.outputs.version }} Runner Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          tag_name: 'v${{ needs.check.outputs.version }}'
-          release_name: 'v${{ needs.check.outputs.version }}'
-          body: See [Release Notes](https://github.com/actions/runner/releases/tag/v${{ needs.check.outputs.version }})
-
-      # Upload release assets (full runner packages)
-      - name: Upload Release Asset (win-x64)
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.createRelease.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/actions-runner-win-x64-${{ needs.check.outputs.version }}.zip
-          asset_name: actions-runner-win-x64-${{ needs.check.outputs.version }}.zip
-          asset_content_type: application/octet-stream
-
-      - name: Upload Release Asset (win-arm64)
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.createRelease.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/actions-runner-win-arm64-${{ needs.check.outputs.version }}.zip
-          asset_name: actions-runner-win-arm64-${{ needs.check.outputs.version }}.zip
-          asset_content_type: application/octet-stream
-
-      - name: Upload Release Asset (linux-x64)
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.createRelease.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/actions-runner-linux-x64-${{ needs.check.outputs.version }}.tar.gz
-          asset_name: actions-runner-linux-x64-${{ needs.check.outputs.version }}.tar.gz
-          asset_content_type: application/octet-stream
-
-      - name: Upload Release Asset (osx-x64)
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.createRelease.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/actions-runner-osx-x64-${{ needs.check.outputs.version }}.tar.gz
-          asset_name: actions-runner-osx-x64-${{ needs.check.outputs.version }}.tar.gz
-          asset_content_type: application/octet-stream
-
-      - name: Upload Release Asset (osx-arm64)
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.createRelease.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/actions-runner-osx-arm64-${{ needs.check.outputs.version }}.tar.gz
-          asset_name: actions-runner-osx-arm64-${{ needs.check.outputs.version }}.tar.gz
-          asset_content_type: application/octet-stream
-
-      - name: Upload Release Asset (linux-arm)
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.createRelease.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/actions-runner-linux-arm-${{ needs.check.outputs.version }}.tar.gz
-          asset_name: actions-runner-linux-arm-${{ needs.check.outputs.version }}.tar.gz
-          asset_content_type: application/octet-stream
-
-      - name: Upload Release Asset (linux-arm64)
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.createRelease.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/actions-runner-linux-arm64-${{ needs.check.outputs.version }}.tar.gz
-          asset_name: actions-runner-linux-arm64-${{ needs.check.outputs.version }}.tar.gz
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ needs.check.outputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --title "v${{ needs.check.outputs.version }}" \
+            --notes "See [Release Notes](https://github.com/actions/runner/releases/tag/v${{ needs.check.outputs.version }})" \
+            actions-runner-*-${{ needs.check.outputs.version }}.*
 
   publish-image:
     needs: [release, check]
+    if: >-
+      always() &&
+      needs.check.result == 'success' &&
+      (
+        needs.release.result == 'success' ||
+        (github.event_name != 'schedule' && needs.release.result == 'skipped')
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -351,14 +294,17 @@ jobs:
             linux/arm64
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.check.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
+            RUNNER_REPOSITORY=${{ github.repository }}
             RUNNER_VERSION=${{ needs.check.outputs.version }}
           push: true
           labels: |
             org.opencontainers.image.source=${{github.server_url}}/${{github.repository}}
             org.opencontainers.image.description=${{github.server_url}}/${{github.repository}}/releases/tag/v${{ needs.check.outputs.version }}
             org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Generate attestation
         uses: actions/attest-build-provenance@v3

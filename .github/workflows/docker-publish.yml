@@ -57,13 +57,16 @@ jobs:
             linux/arm64
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
+            RUNNER_REPOSITORY=${{ github.repository }}
             RUNNER_VERSION=${{ steps.image.outputs.version }}
           push: true
           labels: |
             org.opencontainers.image.source=${{github.server_url}}/${{github.repository}}
             org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ github.sha }}
           annotations: |
             org.opencontainers.image.description=https://github.com/actions/runner/releases/tag/v${{ steps.image.outputs.version }}
 
