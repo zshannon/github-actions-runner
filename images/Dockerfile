@@ -39,8 +39,6 @@ RUN export RUNNER_ARCH=${TARGETARCH} \
 
 FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-noble
 
-ARG GH_VERSION=2.97.0
-
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUNNER_MANUALLY_TRAP_SIG=1
 ENV ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1
@@ -58,7 +56,7 @@ RUN apt update -y \
 # Configure git-core/ppa based on guidance here:  https://git-scm.com/download/linux
 RUN add-apt-repository ppa:git-core/ppa \
     && apt update -y \
-    && apt install -y --no-install-recommends gh=${GH_VERSION} git \
+    && apt install -y --no-install-recommends gh git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN adduser --disabled-password --gecos "" --uid 1001 runner \
