@@ -30,23 +30,33 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          fork_head=$(git rev-parse HEAD)
 
           git remote add upstream https://github.com/falcondev-oss/github-actions-runner
           git fetch upstream
-          if ! git merge --no-edit upstream/main; then
-            # The fork deletes upstream's own CI/CD workflows and ships its own.
-            # Git re-raises a modify/delete conflict every time upstream edits one
-            # of those deleted files, so auto-resolve them by keeping the deletion.
-            git status --porcelain | awk '$1 == "DU" { print $2 }' | xargs -r git rm
-            # Anything still unmerged is a real content conflict (e.g. upstream
-            # touched a patched source file) and needs a human to re-apply the patch.
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Fork is already up to date with upstream."
+          else
+            if ! git merge --no-commit --no-ff upstream/main; then
+              git rev-parse --quiet --verify MERGE_HEAD > /dev/null || exit 1
+            fi
+
+            # Import upstream code and history, but keep the fork's complete
+            # workflow tree. This also resolves workflow-only merge conflicts.
+            git rm -r -f --ignore-unmatch .github/workflows
+            git checkout "$fork_head" -- .github/workflows
+
             if git ls-files -u | grep -q .; then
-              echo "::error::Content conflicts after auto-resolving deletions; re-apply fork patches manually"
+              git diff --name-only --diff-filter=U
+              echo "::error::Content conflicts outside .github/workflows require manual resolution"
               git merge --abort
               exit 1
             fi
+
             git commit --no-edit
           fi
+
           git push origin main
 
   check:
