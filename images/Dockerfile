@@ -46,7 +46,7 @@ ENV ImageOS=ubuntu24
 
 # 'gpg-agent' and 'software-properties-common' are needed for the 'add-apt-repository' command that follows
 RUN apt update -y \
-    && apt install -y --no-install-recommends ca-certificates sudo lsb-release gpg-agent software-properties-common curl jq unzip \
+    && apt install -y --no-install-recommends ca-certificates sudo lsb-release gpg-agent software-properties-common curl jq unzip zstd \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
