@@ -18,6 +18,13 @@ permissions:
   contents: read
 
 jobs:
+  release-source:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Test release source consistency without publishing
+      run: ruby .github/scripts/test-release-source.rb
+
   build:
     strategy:
       matrix:
