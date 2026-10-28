@@ -69,6 +69,8 @@ jobs:
     needs: merge-upstream
     runs-on: ubuntu-latest
     outputs:
+      build_matrix: ${{ steps.check_version.outputs.build_matrix }}
+      should_build: ${{ steps.check_version.outputs.should_build }}
       should_release: ${{ steps.check_version.outputs.should_release }}
       version: ${{ steps.check_version.outputs.version }}
     steps:
@@ -92,6 +94,7 @@ jobs:
             console.log(`Latest runner version: ${runnerVersion}`);
             core.setOutput('version', runnerVersion);
 
+            let shouldRelease = false;
             try {
               const release = await github.rest.repos.getReleaseByTag({
                 owner: '${{ github.repository_owner }}',
@@ -99,19 +102,33 @@ jobs:
                 tag: 'v' + runnerVersion
               })
               console.log('Release with same tag already exists: ' + release.data.html_url)
-              core.setOutput('should_release', 'false');
             } catch (e) {
               // We are good to create the release if release with same tag doesn't exists
               if (e.status != 404) {
                 throw e
               }
               console.log('No existing release found with this tag. Proceeding with release.')
-              core.setOutput('should_release', 'true');
+              shouldRelease = true;
             }
+
+            // Existing versions are quiet on the weekly schedule. Explicit
+            // runs and image changes still build fresh Linux packages for the image.
+            const runtimes = shouldRelease
+              ? ['linux-arm', 'linux-arm64', 'linux-x64', 'osx-arm64', 'osx-x64']
+              : ['linux-arm64', 'linux-x64'];
+            core.setOutput('build_matrix', JSON.stringify({
+              include: runtimes.map(runtime => ({
+                devScript: './dev.sh',
+                os: runtime.startsWith('osx-') ? 'macOS-latest' : 'ubuntu-latest',
+                runtime
+              }))
+            }));
+            core.setOutput('should_build', String(shouldRelease || context.eventName !== 'schedule'));
+            core.setOutput('should_release', String(shouldRelease));
 
   build:
     needs: [check, merge-upstream]
-    if: needs.check.outputs.should_release == 'true'
+    if: needs.check.outputs.should_build == 'true'
     outputs:
       linux-x64-sha: ${{ steps.sha.outputs.linux-x64-sha256 }}
       linux-arm64-sha: ${{ steps.sha.outputs.linux-arm64-sha256 }}
@@ -119,35 +136,7 @@ jobs:
       osx-x64-sha: ${{ steps.sha.outputs.osx-x64-sha256 }}
       osx-arm64-sha: ${{ steps.sha.outputs.osx-arm64-sha256 }}
     strategy:
-      matrix:
-        runtime:
-          [
-            linux-x64,
-            linux-arm64,
-            linux-arm,
-            osx-x64,
-            osx-arm64,
-          ]
-        include:
-          - runtime: linux-x64
-            os: ubuntu-latest
-            devScript: ./dev.sh
-
-          - runtime: linux-arm64
-            os: ubuntu-latest
-            devScript: ./dev.sh
-
-          - runtime: linux-arm
-            os: ubuntu-latest
-            devScript: ./dev.sh
-
-          - runtime: osx-x64
-            os: macOS-latest
-            devScript: ./dev.sh
-
-          - runtime: osx-arm64
-            os: macOS-latest
-            devScript: ./dev.sh
+      matrix: ${{ fromJSON(needs.check.outputs.build_matrix) }}
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -197,6 +186,7 @@ jobs:
             _package
 
   release:
+    if: needs.check.outputs.should_release == 'true'
     needs: [build, check, merge-upstream]
     runs-on: ubuntu-latest
     permissions:
@@ -260,9 +250,18 @@ jobs:
             actions-runner-*-${{ needs.check.outputs.version }}.*
 
   publish-image:
-    # Only publish with packages built and released by this run. An existing
-    # version is a no-op, including manual runs and image-only main pushes.
+    # Image-only updates use fresh Linux packages from this same source commit,
+    # without replacing the existing version's release assets or tag.
     needs: [build, check, merge-upstream, release]
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      needs.check.result == 'success' &&
+      needs.merge-upstream.result == 'success' &&
+      (
+        needs.release.result == 'success' ||
+        (needs.check.outputs.should_release == 'false' && needs.release.result == 'skipped')
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -277,6 +276,18 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ needs.merge-upstream.outputs.source_sha }}
+
+      - name: Download this run's Linux x64 package
+        uses: actions/download-artifact@v5
+        with:
+          name: runner-packages-linux-x64
+          path: images/runner-packages
+
+      - name: Download this run's Linux arm64 package
+        uses: actions/download-artifact@v5
+        with:
+          name: runner-packages-linux-arm64
+          path: images/runner-packages
 
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
@@ -303,13 +314,13 @@ jobs:
           build-args: |
             RUNNER_PACKAGE_SHA256_ARM64=${{ needs.build.outputs.linux-arm64-sha }}
             RUNNER_PACKAGE_SHA256_X64=${{ needs.build.outputs.linux-x64-sha }}
-            RUNNER_REPOSITORY=${{ github.repository }}
+            RUNNER_PACKAGE_SOURCE=local
             RUNNER_VERSION=${{ needs.check.outputs.version }}
             VERIFY_RUNNER_PACKAGE=true
           push: true
           labels: |
             org.opencontainers.image.source=${{github.server_url}}/${{github.repository}}
-            org.opencontainers.image.description=${{github.server_url}}/${{github.repository}}/releases/tag/v${{ needs.check.outputs.version }}
+            org.opencontainers.image.description=Runner ${{ needs.check.outputs.version }} built from ${{github.server_url}}/${{github.repository}}/commit/${{ needs.merge-upstream.outputs.source_sha }}
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.revision=${{ needs.merge-upstream.outputs.source_sha }}
 

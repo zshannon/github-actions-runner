@@ -69,14 +69,14 @@ jobs:
 
     # Create runner package tar.gz/zip
     - name: Package Release
-      if: github.event_name != 'pull_request'
+      if: github.event_name != 'pull_request' || matrix.runtime == 'linux-x64' || matrix.runtime == 'linux-arm64'
       run: |
         ${{ matrix.devScript }} package Release ${{ matrix.runtime }}
       working-directory: src
 
     # Upload runner package tar.gz/zip as artifact
     - name: Publish Artifact
-      if: github.event_name != 'pull_request'
+      if: github.event_name != 'pull_request' || matrix.runtime == 'linux-x64' || matrix.runtime == 'linux-arm64'
       uses: actions/upload-artifact@v7
       with:
         name: runner-package-${{ matrix.runtime }}
@@ -84,30 +84,34 @@ jobs:
           _package
 
   docker:
+    needs: build
     strategy:
       matrix:
         os: [ ubuntu-latest, ubuntu-24.04-arm ]
         include:
           - os: ubuntu-latest
             docker_platform: linux/amd64
+            runtime: linux-x64
           - os: ubuntu-24.04-arm
             docker_platform: linux/arm64
+            runtime: linux-arm64
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v7
 
-    - name: Get latest published runner package
-      id: latest_runner
-      uses: actions/github-script@v9
+    - name: Download the package built by this run
+      uses: actions/download-artifact@v5
       with:
-        github-token: ${{secrets.GITHUB_TOKEN}}
-        script: |
-          const release = await github.rest.repos.getLatestRelease({
-            owner: 'falcondev-oss',
-            repo: 'github-actions-runner',
-          });
-          const version = release.data.tag_name.replace(/^v/, '');
-          core.setOutput('version', version);
+        name: runner-package-${{ matrix.runtime }}
+        path: images/runner-packages
+
+    - name: Read package version and checksum
+      id: package
+      run: |
+        version=$(cat src/runnerversion)
+        package="images/runner-packages/actions-runner-${{ matrix.runtime }}-${version}.tar.gz"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "sha256=$(sha256sum "$package" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
     - name: Setup Docker buildx
       uses: docker/setup-buildx-action@v4
@@ -121,10 +125,14 @@ jobs:
         tags: |
           ${{ github.sha }}:latest
         build-args: |
-          RUNNER_REPOSITORY=falcondev-oss/github-actions-runner
-          RUNNER_VERSION=${{ steps.latest_runner.outputs.version }}
+          RUNNER_PACKAGE_SHA256_ARM64=${{ steps.package.outputs.sha256 }}
+          RUNNER_PACKAGE_SHA256_X64=${{ steps.package.outputs.sha256 }}
+          RUNNER_PACKAGE_SOURCE=local
+          RUNNER_VERSION=${{ steps.package.outputs.version }}
+          VERIFY_RUNNER_PACKAGE=true
 
     - name: Test Docker image
       run: |
-        docker run --rm ${{ github.sha }}:latest ./run.sh --version
+        version=$(docker run --rm -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0 ${{ github.sha }}:latest ./run.sh --version)
+        test "$version" = "${{ steps.package.outputs.version }}"
   
