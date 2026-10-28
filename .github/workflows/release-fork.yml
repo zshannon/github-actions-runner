@@ -17,6 +17,8 @@ concurrency:
 
 jobs:
   merge-upstream:
+    outputs:
+      source_sha: ${{ steps.merge.outputs.source_sha }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -25,8 +27,10 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          ref: main
 
       - name: Merge upstream
+        id: merge
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -57,18 +61,22 @@ jobs:
             git commit --no-edit
           fi
 
-          git push origin main
+          git push origin HEAD:refs/heads/main
+          # Export only after the push succeeds. Even a no-op run has one fixed source.
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   check:
     needs: merge-upstream
     runs-on: ubuntu-latest
     outputs:
+      build_matrix: ${{ steps.check_version.outputs.build_matrix }}
+      should_build: ${{ steps.check_version.outputs.should_build }}
       should_release: ${{ steps.check_version.outputs.should_release }}
       version: ${{ steps.check_version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ needs.merge-upstream.outputs.source_sha }}
 
       # Query GitHub release ensure version is not used
       - name: Check version
@@ -86,6 +94,7 @@ jobs:
             console.log(`Latest runner version: ${runnerVersion}`);
             core.setOutput('version', runnerVersion);
 
+            let shouldRelease = false;
             try {
               const release = await github.rest.repos.getReleaseByTag({
                 owner: '${{ github.repository_owner }}',
@@ -93,19 +102,33 @@ jobs:
                 tag: 'v' + runnerVersion
               })
               console.log('Release with same tag already exists: ' + release.data.html_url)
-              core.setOutput('should_release', 'false');
             } catch (e) {
               // We are good to create the release if release with same tag doesn't exists
               if (e.status != 404) {
                 throw e
               }
               console.log('No existing release found with this tag. Proceeding with release.')
-              core.setOutput('should_release', 'true');
+              shouldRelease = true;
             }
 
+            // Existing versions are quiet on the weekly schedule. Explicit
+            // runs and image changes still build fresh Linux packages for the image.
+            const runtimes = shouldRelease
+              ? ['linux-arm', 'linux-arm64', 'linux-x64', 'osx-arm64', 'osx-x64']
+              : ['linux-arm64', 'linux-x64'];
+            core.setOutput('build_matrix', JSON.stringify({
+              include: runtimes.map(runtime => ({
+                devScript: './dev.sh',
+                os: runtime.startsWith('osx-') ? 'macOS-latest' : 'ubuntu-latest',
+                runtime
+              }))
+            }));
+            core.setOutput('should_build', String(shouldRelease || context.eventName !== 'schedule'));
+            core.setOutput('should_release', String(shouldRelease));
+
   build:
-    needs: check
-    if: needs.check.outputs.should_release == 'true'
+    needs: [check, merge-upstream]
+    if: needs.check.outputs.should_build == 'true'
     outputs:
       linux-x64-sha: ${{ steps.sha.outputs.linux-x64-sha256 }}
       linux-arm64-sha: ${{ steps.sha.outputs.linux-arm64-sha256 }}
@@ -113,39 +136,13 @@ jobs:
       osx-x64-sha: ${{ steps.sha.outputs.osx-x64-sha256 }}
       osx-arm64-sha: ${{ steps.sha.outputs.osx-arm64-sha256 }}
     strategy:
-      matrix:
-        runtime:
-          [
-            linux-x64,
-            linux-arm64,
-            linux-arm,
-            osx-x64,
-            osx-arm64,
-          ]
-        include:
-          - runtime: linux-x64
-            os: ubuntu-latest
-            devScript: ./dev.sh
-
-          - runtime: linux-arm64
-            os: ubuntu-latest
-            devScript: ./dev.sh
-
-          - runtime: linux-arm
-            os: ubuntu-latest
-            devScript: ./dev.sh
-
-          - runtime: osx-x64
-            os: macOS-latest
-            devScript: ./dev.sh
-
-          - runtime: osx-arm64
-            os: macOS-latest
-            devScript: ./dev.sh
+      matrix: ${{ fromJSON(needs.check.outputs.build_matrix) }}
 
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.merge-upstream.outputs.source_sha }}
 
       - name: Update `runnerversion` file
         run: |
@@ -189,12 +186,15 @@ jobs:
             _package
 
   release:
-    needs: [build, check]
+    if: needs.check.outputs.should_release == 'true'
+    needs: [build, check, merge-upstream]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.merge-upstream.outputs.source_sha }}
 
       # Download runner package tar.gz/zip produced by 'build' job
       - name: Download Artifact (osx-x64)
@@ -235,21 +235,32 @@ jobs:
       - name: Create ${{ needs.check.outputs.version }} Runner Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ needs.merge-upstream.outputs.source_sha }}
         run: |
+          # A non-forced push refuses an existing tag at any other commit.
+          # --target alone would silently reuse a pre-existing, mismatched tag.
+          git update-ref "refs/tags/v${{ needs.check.outputs.version }}" "$SOURCE_SHA"
+          git push origin "refs/tags/v${{ needs.check.outputs.version }}"
           gh release create "v${{ needs.check.outputs.version }}" \
             --repo "${{ github.repository }}" \
+            --target "$SOURCE_SHA" \
             --title "v${{ needs.check.outputs.version }}" \
-            --notes "See [Release Notes](https://github.com/actions/runner/releases/tag/v${{ needs.check.outputs.version }})" \
+            --verify-tag \
+            --notes "Source: $SOURCE_SHA. See [Release Notes](https://github.com/actions/runner/releases/tag/v${{ needs.check.outputs.version }})" \
             actions-runner-*-${{ needs.check.outputs.version }}.*
 
   publish-image:
-    needs: [release, check]
+    # Image-only updates use fresh Linux packages from this same source commit,
+    # without replacing the existing version's release assets or tag.
+    needs: [build, check, merge-upstream, release]
     if: >-
       always() &&
+      needs.build.result == 'success' &&
       needs.check.result == 'success' &&
+      needs.merge-upstream.result == 'success' &&
       (
         needs.release.result == 'success' ||
-        (github.event_name != 'schedule' && needs.release.result == 'skipped')
+        (needs.check.outputs.should_release == 'false' && needs.release.result == 'skipped')
       )
     runs-on: ubuntu-latest
     permissions:
@@ -263,6 +274,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.merge-upstream.outputs.source_sha }}
+
+      - name: Download this run's Linux x64 package
+        uses: actions/download-artifact@v5
+        with:
+          name: runner-packages-linux-x64
+          path: images/runner-packages
+
+      - name: Download this run's Linux arm64 package
+        uses: actions/download-artifact@v5
+        with:
+          name: runner-packages-linux-arm64
+          path: images/runner-packages
 
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
@@ -284,21 +309,49 @@ jobs:
             linux/arm64
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.check.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.merge-upstream.outputs.source_sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
-            RUNNER_REPOSITORY=${{ github.repository }}
+            RUNNER_PACKAGE_SHA256_ARM64=${{ needs.build.outputs.linux-arm64-sha }}
+            RUNNER_PACKAGE_SHA256_X64=${{ needs.build.outputs.linux-x64-sha }}
+            RUNNER_PACKAGE_SOURCE=local
             RUNNER_VERSION=${{ needs.check.outputs.version }}
+            VERIFY_RUNNER_PACKAGE=true
           push: true
           labels: |
             org.opencontainers.image.source=${{github.server_url}}/${{github.repository}}
-            org.opencontainers.image.description=${{github.server_url}}/${{github.repository}}/releases/tag/v${{ needs.check.outputs.version }}
+            org.opencontainers.image.description=Runner ${{ needs.check.outputs.version }} built from ${{github.server_url}}/${{github.repository}}/commit/${{ needs.merge-upstream.outputs.source_sha }}
             org.opencontainers.image.licenses=MIT
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.merge-upstream.outputs.source_sha }}
+
+      - name: Generate workflow provenance
+        id: workflow-provenance
+        uses: actions/attest-build-provenance/predicate@v3
+
+      - name: Record merged source in provenance
+        id: source-provenance
+        uses: actions/github-script@v9
+        env:
+          PREDICATE: ${{ steps.workflow-provenance.outputs.predicate }}
+          SOURCE_SHA: ${{ needs.merge-upstream.outputs.source_sha }}
+        with:
+          script: |
+            const predicate = JSON.parse(process.env.PREDICATE);
+            // Keep the triggering workflow revision as a dependency; it is
+            // different from the source checked out after the upstream merge.
+            predicate.buildDefinition.resolvedDependencies.push({
+              digest: { gitCommit: process.env.SOURCE_SHA },
+              name: 'runner-source',
+              uri: `git+${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}@${process.env.SOURCE_SHA}`
+            });
+            core.setOutput('predicate', JSON.stringify(predicate));
 
       - name: Generate attestation
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest@v4.2.2
         with:
+          create-storage-record: false
+          predicate: ${{ steps.source-provenance.outputs.predicate }}
+          predicate-type: ${{ steps.workflow-provenance.outputs.predicate-type }}
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build-and-push.outputs.digest }}
           push-to-registry: true

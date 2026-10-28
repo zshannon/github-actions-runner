@@ -1,20 +1,39 @@
 # Source: https://github.com/dotnet/dotnet-docker
 FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-noble AS build
 
-ARG TARGETOS
-ARG TARGETARCH
-ARG RUNNER_VERSION
-ARG RUNNER_REPOSITORY=falcondev-oss/github-actions-runner
-ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
-ARG DOCKER_VERSION=29.9.0
 ARG BUILDX_VERSION=0.38.0
+ARG DOCKER_VERSION=29.9.0
+ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
+ARG RUNNER_PACKAGE_SHA256_ARM64
+ARG RUNNER_PACKAGE_SHA256_X64
+ARG RUNNER_PACKAGE_SOURCE=release
+ARG RUNNER_REPOSITORY=falcondev-oss/github-actions-runner
+ARG RUNNER_VERSION
+ARG TARGETARCH
+ARG TARGETOS
+ARG VERIFY_RUNNER_PACKAGE=false
 
 RUN apt update -y && apt install curl unzip -y
 
 WORKDIR /actions-runner
-RUN export RUNNER_ARCH=${TARGETARCH} \
+RUN --mount=type=bind,source=.,target=/build-context \
+    export RUNNER_ARCH=${TARGETARCH} \
     && if [ "$RUNNER_ARCH" = "amd64" ]; then export RUNNER_ARCH=x64 ; fi \
-    && curl -f -L -o runner.tar.gz https://github.com/${RUNNER_REPOSITORY}/releases/download/v${RUNNER_VERSION}/actions-runner-${TARGETOS}-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz \
+    && case "$RUNNER_PACKAGE_SOURCE" in \
+         local) cp "/build-context/runner-packages/actions-runner-${TARGETOS}-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz" runner.tar.gz ;; \
+         release) curl -f -L -o runner.tar.gz "https://github.com/${RUNNER_REPOSITORY}/releases/download/v${RUNNER_VERSION}/actions-runner-${TARGETOS}-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz" ;; \
+         *) echo "Unsupported runner package source: $RUNNER_PACKAGE_SOURCE" >&2; exit 1 ;; \
+       esac \
+    && if [ "$RUNNER_PACKAGE_SOURCE" = "local" ] || [ "$VERIFY_RUNNER_PACKAGE" = "true" ]; then \
+         case "$RUNNER_ARCH" in \
+           arm64) RUNNER_PACKAGE_SHA256="$RUNNER_PACKAGE_SHA256_ARM64" ;; \
+           x64) RUNNER_PACKAGE_SHA256="$RUNNER_PACKAGE_SHA256_X64" ;; \
+           *) echo "Unsupported runner architecture: $RUNNER_ARCH" >&2; exit 1 ;; \
+         esac; \
+         case "$RUNNER_PACKAGE_SHA256" in *[!0-9a-f]*|'') echo "Invalid runner package SHA256" >&2; exit 1 ;; esac; \
+         [ "${#RUNNER_PACKAGE_SHA256}" -eq 64 ] || exit 1; \
+         echo "$RUNNER_PACKAGE_SHA256  runner.tar.gz" | sha256sum -c -; \
+       fi \
     && tar xzf ./runner.tar.gz \
     && rm runner.tar.gz
 
