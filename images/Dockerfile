@@ -1,21 +1,24 @@
 # Source: https://github.com/dotnet/dotnet-docker
 FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-noble AS build
 
-ARG BUILDX_VERSION=0.38.0
-ARG DOCKER_VERSION=29.9.0
-ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
-ARG RUNNER_PACKAGE_SHA256_ARM64
-ARG RUNNER_PACKAGE_SHA256_X64
-ARG RUNNER_PACKAGE_SOURCE=release
-ARG RUNNER_REPOSITORY=falcondev-oss/github-actions-runner
-ARG RUNNER_VERSION
-ARG TARGETARCH
 ARG TARGETOS
-ARG VERIFY_RUNNER_PACKAGE=false
+ARG TARGETARCH
+ARG RUNNER_VERSION
+ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
+ARG DOCKER_VERSION=29.9.2
+ARG BUILDX_VERSION=0.38.1
 
 RUN apt update -y && apt install curl unzip -y
 
 WORKDIR /actions-runner
+
+# Fork-only package inputs stay separate from upstream's version declarations.
+ARG RUNNER_PACKAGE_SHA256_ARM64
+ARG RUNNER_PACKAGE_SHA256_X64
+ARG RUNNER_PACKAGE_SOURCE=release
+ARG RUNNER_REPOSITORY=falcondev-oss/github-actions-runner
+ARG VERIFY_RUNNER_PACKAGE=false
+
 RUN --mount=type=bind,source=.,target=/build-context \
     export RUNNER_ARCH=${TARGETARCH} \
     && if [ "$RUNNER_ARCH" = "amd64" ]; then export RUNNER_ARCH=x64 ; fi \

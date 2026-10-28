@@ -254,4 +254,56 @@ Dir.mktmpdir('runner-source-') do |tmp|
   attest = step('publish-image', 'Generate attestation').fetch('with')
   assert(attest['predicate'] == '${{ steps.source-provenance.outputs.predicate }}', 'Sign the source-aware predicate')
   puts 'PASS: signed provenance distinguishes workflow revision from merged source'
+
+
+  # A real upstream version bump must merge with the fork's package inputs.
+  # Keep the upstream declaration order in the common ancestor so reordering
+  # those lines in the fork reproduces the production conflict.
+  versions = dockerfile.scan(/^ARG (DOCKER_VERSION|BUILDX_VERSION)=(.+)$/).to_h
+  upstream_header = <<~DOCKER
+    # Source: https://github.com/dotnet/dotnet-docker
+    FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-noble AS build
+
+    ARG TARGETOS
+    ARG TARGETARCH
+    ARG RUNNER_VERSION
+    ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
+    ARG DOCKER_VERSION=#{versions.fetch('DOCKER_VERSION')}
+    ARG BUILDX_VERSION=#{versions.fetch('BUILDX_VERSION')}
+
+  DOCKER
+  upstream_body = dockerfile[dockerfile.index('RUN apt update')..-1].lines.reject do |line|
+    line.match?(/^ARG (?:RUNNER_PACKAGE_SHA256_|RUNNER_PACKAGE_SOURCE|RUNNER_REPOSITORY|VERIFY_RUNNER_PACKAGE)/)
+  end.join
+  docker_base = upstream_header + upstream_body
+  vendor, docker_origin, docker_upstream, docker_fork = %w[vendor docker-origin docker-upstream docker-fork].map { |name| "#{tmp}/#{name}" }
+  FileUtils.mkdir_p(vendor)
+  git('init', '-b', 'main', dir: vendor)
+  commit(vendor, '.github/workflows/fixture.yml', 'fork workflow')
+  commit(vendor, 'images/Dockerfile', docker_base)
+  git('clone', '--bare', vendor, docker_origin, dir: tmp)
+  git('clone', '--bare', vendor, docker_upstream, dir: tmp)
+  git('clone', docker_origin, docker_fork, dir: tmp)
+  commit(docker_fork, 'images/Dockerfile', dockerfile)
+  git('push', 'origin', 'main', dir: docker_fork)
+  versions.each do |key, value|
+    docker_base = docker_base.sub("ARG #{key}=#{value}", "ARG #{key}=#{value.sub(/\d+$/) { |n| (n.to_i + 1).to_s }}")
+  end
+  commit(vendor, 'images/Dockerfile', docker_base)
+  git('push', docker_upstream, 'main', dir: vendor)
+  merge_output = "#{tmp}/docker-merge.output"
+  File.write(merge_output, '')
+  script = merge_step.fetch('run').gsub('https://github.com/falcondev-oss/github-actions-runner', docker_upstream)
+  command('bash', '-e', '-o', 'pipefail', '-c', script, dir: docker_fork, env: { 'GITHUB_OUTPUT' => merge_output })
+  merged_dockerfile = File.read("#{docker_fork}/images/Dockerfile")
+  versions.each do |key, value|
+    updated = value.sub(/\d+$/) { |n| (n.to_i + 1).to_s }
+    assert(merged_dockerfile.include?("ARG #{key}=#{updated}"), 'Accept upstream Docker and Buildx versions')
+  end
+  %w[RUNNER_PACKAGE_SHA256_ARM64 RUNNER_PACKAGE_SHA256_X64 RUNNER_PACKAGE_SOURCE RUNNER_REPOSITORY VERIFY_RUNNER_PACKAGE].each do |key|
+    assert(merged_dockerfile.match?(/^ARG #{key}(?:=|$)/), 'Retain the fork package inputs')
+  end
+  assert(merged_dockerfile.include?('local) cp'), 'Retain same-run package consumption')
+  assert(File.read(merge_output).strip == "source_sha=#{git('rev-parse', 'HEAD', dir: docker_fork)}", 'Export the merged Docker update source')
+  puts 'PASS: upstream Docker/Buildx version bumps merge cleanly and preserve fork package handling'
 end
