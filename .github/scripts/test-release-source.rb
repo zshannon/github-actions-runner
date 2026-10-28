@@ -77,7 +77,7 @@ Dir.mktmpdir('runner-source-') do |tmp|
     File.write(yield_path, '')
     [checkout, yield_path, lambda do
       command('bash', '-e', '-o', 'pipefail', '-c', merge_script, dir: checkout,
-              env: { 'GITHUB_OUTPUT' => yield_path }, success: expected_success)
+              env: { 'GITHUB_OUTPUT' => yield_path, 'TARGET_BRANCH' => 'main' }, success: expected_success)
     end]
   end
 
@@ -124,9 +124,10 @@ Dir.mktmpdir('runner-source-') do |tmp|
   File.write("#{bin}/gh", "#!/usr/bin/env ruby\nrequire 'json'\nFile.write(ENV.fetch('GH_ARGS'), JSON.generate(ARGV))\n")
   File.chmod(0755, "#{bin}/gh")
   args_path = "#{tmp}/gh.json"
-  env = { 'GH_ARGS' => args_path, 'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'SOURCE_SHA' => source_sha }
+  env = { 'GH_ARGS' => args_path, 'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'SOURCE_SHA' => source_sha, 'RELEASE_TAG' => 'v1.2.3', 'PRERELEASE' => 'false' }
   command('bash', '-e', '-o', 'pipefail', '-c', release_script, dir: checkout, env: env)
   args = JSON.parse(File.read(args_path))
+  assert(!args.include?('--prerelease') && !args.include?('--latest=false'), 'Normal releases retain stable publication behavior')
   assert(args[args.index('--target') + 1] == source_sha && args.include?('--verify-tag'), 'Release must verify and target the merged commit')
   assert(git('rev-parse', 'v1.2.3', dir: origin) == source_sha, 'Release tag must point to the built commit')
   # Retry after tag creation is safe; an unrelated existing tag must be refused.
@@ -137,6 +138,13 @@ Dir.mktmpdir('runner-source-') do |tmp|
   assert(!File.exist?(args_path), 'A mismatched tag must stop before creating a release')
   assert(git('rev-parse', 'v1.2.3', dir: origin) == event_sha, 'Never overwrite an existing tag')
   puts 'PASS: release tags the selected commit; mismatched tags cannot be published or overwritten'
+  command('bash', '-e', '-o', 'pipefail', '-c', release_script, dir: checkout,
+          env: env.merge('PRERELEASE' => 'true', 'RELEASE_TAG' => 'e2e-fixture-v1.2.3'))
+  prerelease_args = JSON.parse(File.read(args_path))
+  assert(prerelease_args[2] == 'e2e-fixture-v1.2.3', 'Publishing verification uses an isolated tag')
+  assert(prerelease_args.include?('--prerelease') && prerelease_args.include?('--latest=false'), 'Publishing verification must not replace the latest stable release')
+  assert(git('rev-parse', 'e2e-fixture-v1.2.3', dir: origin) == source_sha, 'Verification tag points to the selected source')
+  puts 'PASS: publishing verification uses a distinct prerelease tag and never replaces stable latest'
 
   check_script = render(step('check', 'check_version').fetch('with').fetch('script'),
                         'github.repository_owner' => 'fixture', 'github.event.repository.name' => 'runner')
@@ -294,7 +302,7 @@ Dir.mktmpdir('runner-source-') do |tmp|
   merge_output = "#{tmp}/docker-merge.output"
   File.write(merge_output, '')
   script = merge_step.fetch('run').gsub('https://github.com/falcondev-oss/github-actions-runner', docker_upstream)
-  command('bash', '-e', '-o', 'pipefail', '-c', script, dir: docker_fork, env: { 'GITHUB_OUTPUT' => merge_output })
+  command('bash', '-e', '-o', 'pipefail', '-c', script, dir: docker_fork, env: { 'GITHUB_OUTPUT' => merge_output, 'TARGET_BRANCH' => 'main' })
   merged_dockerfile = File.read("#{docker_fork}/images/Dockerfile")
   versions.each do |key, value|
     updated = value.sub(/\d+$/) { |n| (n.to_i + 1).to_s }

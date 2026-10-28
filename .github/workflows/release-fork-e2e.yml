@@ -1,0 +1,213 @@
+name: Runner publishing end-to-end
+
+on:
+  push:
+    branches: ['codex/runner-e2e-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  settings:
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.settings.outputs.image_name }}
+      latest_release: ${{ steps.settings.outputs.latest_release }}
+      release_tag_prefix: ${{ steps.settings.outputs.release_tag_prefix }}
+    steps:
+      - name: Isolate test publication destinations
+        id: settings
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            codex/runner-e2e-*) ;;
+            *) echo '::error::Publishing verification requires a codex/runner-e2e-* branch'; exit 1 ;;
+          esac
+          {
+            echo "image_name=${GITHUB_REPOSITORY_OWNER,,}/actions-runner-e2e-${GITHUB_RUN_ID}"
+            echo "release_tag_prefix=e2e-${GITHUB_RUN_ID}-v"
+            echo "latest_release=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          } >> "$GITHUB_OUTPUT"
+
+  new-release:
+    needs: settings
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/release-fork.yml
+    with:
+      image_name: ${{ needs.settings.outputs.image_name }}
+      prerelease: true
+      release_tag_prefix: ${{ needs.settings.outputs.release_tag_prefix }}
+      source_branch: ${{ github.ref_name }}
+
+  verify-release:
+    needs: [new-release, settings]
+    runs-on: ubuntu-latest
+    outputs:
+      assets: ${{ steps.verify.outputs.assets }}
+      release_id: ${{ steps.verify.outputs.release_id }}
+    steps:
+      - name: Download and verify the published release
+        id: verify
+        env:
+          CHECKSUMS: ${{ needs.new-release.outputs.package_checksums }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_NAME: ${{ needs.settings.outputs.image_name }}
+          LATEST_RELEASE: ${{ needs.settings.outputs.latest_release }}
+          RELEASE_TAG: ${{ needs.new-release.outputs.release_tag }}
+          SHOULD_RELEASE: ${{ needs.new-release.outputs.should_release }}
+          SOURCE_SHA: ${{ needs.new-release.outputs.source_sha }}
+          VERSION: ${{ needs.new-release.outputs.version }}
+        run: |
+          test "$SHOULD_RELEASE" = 'true'
+          test "$RELEASE_TAG" = "e2e-${GITHUB_RUN_ID}-v${VERSION}"
+          test "$IMAGE_NAME" = "${GITHUB_REPOSITORY_OWNER,,}/actions-runner-e2e-${GITHUB_RUN_ID}"
+          mkdir published-release
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > published-release/release.json
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > published-release/tag.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir published-release --pattern 'actions-runner-*.tar.gz'
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const release = JSON.parse(fs.readFileSync('published-release/release.json'));
+          const tag = JSON.parse(fs.readFileSync('published-release/tag.json'));
+          const checksums = JSON.parse(process.env.CHECKSUMS);
+          assert.equal(release.draft, false);
+          assert.equal(release.prerelease, true);
+          assert.equal(release.target_commitish, process.env.SOURCE_SHA);
+          assert.equal(tag.object.type, 'commit');
+          assert.equal(tag.object.sha, process.env.SOURCE_SHA);
+          const runtimes = ['linux-arm', 'linux-arm64', 'linux-x64', 'osx-arm64', 'osx-x64'];
+          assert.equal(release.assets.length, runtimes.length);
+          for (const runtime of runtimes) {
+            const name = `actions-runner-${runtime}-${process.env.VERSION}.tar.gz`;
+            const expected = checksums[`${runtime}-sha`];
+            assert.match(expected, /^[0-9a-f]{64}$/);
+            const actual = crypto.createHash('sha256').update(fs.readFileSync(`published-release/${name}`)).digest('hex');
+            assert.equal(actual, expected, name);
+            assert.equal(release.assets.find(asset => asset.name === name).digest, `sha256:${expected}`);
+            console.log(`Published asset verified: ${name} ${actual}`);
+          }
+          const assets = release.assets.map(({ id, name, digest }) => ({ digest, id, name })).sort((a, b) => a.name.localeCompare(b.name));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `release_id=${release.id}\nassets=${JSON.stringify(assets)}\n`);
+          JS
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = "$LATEST_RELEASE"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: publishing-e2e-release-evidence
+          path: published-release/*.json
+          retention-days: 7
+
+  image-only:
+    needs: [new-release, settings, verify-release]
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/release-fork.yml
+    with:
+      image_name: ${{ needs.settings.outputs.image_name }}
+      prerelease: true
+      release_tag_prefix: ${{ needs.settings.outputs.release_tag_prefix }}
+      source_branch: ${{ github.ref_name }}
+
+  verify-images:
+    needs: [image-only, new-release, settings]
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      IMAGE_NAME: ${{ needs.settings.outputs.image_name }}
+      IMAGE_ONLY_DIGEST: ${{ needs.image-only.outputs.image_digest }}
+      IMAGE_ONLY_SOURCE: ${{ needs.image-only.outputs.source_sha }}
+      IMAGE_ONLY_VERSION: ${{ needs.image-only.outputs.version }}
+      RELEASE_DIGEST: ${{ needs.new-release.outputs.image_digest }}
+      RELEASE_SOURCE: ${{ needs.new-release.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.new-release.outputs.version }}
+    steps:
+      - name: Verify published image contents and signed attestations
+        run: |
+          test '${{ needs.image-only.outputs.should_release }}' = 'false'
+          test "$IMAGE_NAME" = "${GITHUB_REPOSITORY_OWNER,,}/actions-runner-e2e-${GITHUB_RUN_ID}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          mkdir image-evidence
+          for phase in release image-only; do
+            if [ "$phase" = release ]; then
+              digest="$RELEASE_DIGEST"
+              expected_source="$RELEASE_SOURCE"
+              expected_version="$RELEASE_VERSION"
+            else
+              digest="$IMAGE_ONLY_DIGEST"
+              expected_source="$IMAGE_ONLY_SOURCE"
+              expected_version="$IMAGE_ONLY_VERSION"
+            fi
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            image="ghcr.io/${IMAGE_NAME}@${digest}"
+            docker pull "$image"
+            actual_source=$(docker run --rm -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0 "$image" ./bin/Runner.Listener --commit)
+            actual_version=$(docker run --rm -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0 "$image" ./bin/Runner.Listener --version)
+            actual_revision=$(docker inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            test "$actual_source" = "$expected_source"
+            test "$actual_revision" = "$expected_source"
+            test "$actual_version" = "$expected_version"
+            echo "Verified $phase image: $image; source=$actual_source; version=$actual_version"
+            gh attestation verify "oci://$image" --repo "$GITHUB_REPOSITORY" --format json > "image-evidence/${phase}-attestation.json"
+            EXPECTED_SOURCE="$expected_source" node - "image-evidence/${phase}-attestation.json" <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const result = JSON.parse(fs.readFileSync(process.argv[2]));
+          const predicates = [];
+          function visit(value) {
+            if (!value || typeof value !== 'object') return;
+            if (value.predicate?.buildDefinition) predicates.push(value.predicate);
+            for (const child of Object.values(value)) visit(child);
+          }
+          visit(result);
+          assert(predicates.some(predicate => predicate.buildDefinition.resolvedDependencies.some(
+            dependency => dependency.name === 'runner-source' && dependency.digest.gitCommit === process.env.EXPECTED_SOURCE
+          )), 'Verified attestation must include the actual runner source commit');
+          JS
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: publishing-e2e-images-${{ matrix.os }}
+          path: image-evidence
+          retention-days: 7
+
+  verify-preservation:
+    needs: [image-only, new-release, settings, verify-images, verify-release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm image-only publishing preserved release assets and production latest
+        env:
+          EXPECTED_ASSETS: ${{ needs.verify-release.outputs.assets }}
+          EXPECTED_RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_RELEASE: ${{ needs.settings.outputs.latest_release }}
+          RELEASE_TAG: ${{ needs.new-release.outputs.release_tag }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const release = JSON.parse(fs.readFileSync('release.json'));
+          const assets = release.assets.map(({ id, name, digest }) => ({ digest, id, name })).sort((a, b) => a.name.localeCompare(b.name));
+          assert.equal(String(release.id), process.env.EXPECTED_RELEASE_ID);
+          assert.deepEqual(assets, JSON.parse(process.env.EXPECTED_ASSETS));
+          console.log('Image-only publication preserved the existing release and all five assets.');
+          JS
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = "$LATEST_RELEASE"
