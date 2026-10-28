@@ -96,15 +96,15 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - name: Get latest runner version
+    - name: Get latest published runner package
       id: latest_runner
       uses: actions/github-script@v9
       with:
         github-token: ${{secrets.GITHUB_TOKEN}}
         script: |
           const release = await github.rest.repos.getLatestRelease({
-            owner: 'actions',
-            repo: 'runner',
+            owner: 'falcondev-oss',
+            repo: 'github-actions-runner',
           });
           const version = release.data.tag_name.replace(/^v/, '');
           core.setOutput('version', version);
@@ -121,6 +121,7 @@ jobs:
         tags: |
           ${{ github.sha }}:latest
         build-args: |
+          RUNNER_REPOSITORY=falcondev-oss/github-actions-runner
           RUNNER_VERSION=${{ steps.latest_runner.outputs.version }}
 
     - name: Test Docker image

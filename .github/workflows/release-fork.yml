@@ -338,6 +338,7 @@ jobs:
       - name: Generate attestation
         uses: actions/attest@v4.2.2
         with:
+          create-storage-record: false
           predicate: ${{ steps.source-provenance.outputs.predicate }}
           predicate-type: ${{ steps.workflow-provenance.outputs.predicate-type }}
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
