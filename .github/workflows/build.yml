@@ -133,6 +133,10 @@ jobs:
 
     - name: Test Docker image
       run: |
-        version=$(docker run --rm -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0 ${{ github.sha }}:latest ./run.sh --version)
+        version=$(docker run --rm -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0 ${{ github.sha }}:latest ./bin/Runner.Listener --version)
+        commit=$(docker run --rm -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0 ${{ github.sha }}:latest ./bin/Runner.Listener --commit)
+        echo "Container runner version: $version"
+        echo "Container runner source: $commit"
         test "$version" = "${{ steps.package.outputs.version }}"
+        test "$commit" = "$(git rev-parse HEAD)"
   
