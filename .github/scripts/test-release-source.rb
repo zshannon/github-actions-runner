@@ -198,7 +198,7 @@ Dir.mktmpdir('runner-source-') do |tmp|
 
   image = JOBS.fetch('publish-image')
   downloads = image.fetch('steps').select { |s| s['uses'].to_s.start_with?('actions/download-artifact@') }
-  assert(downloads.map { |s| s['with']['name'] }.sort == %w[runner-packages-linux-arm64 runner-packages-linux-x64], 'Use Linux artifacts from this run')
+  assert(downloads.map { |s| s['with']['name'].sub("${{ inputs.artifact_prefix || 'runner-packages' }}", 'runner-packages') }.sort == %w[runner-packages-linux-arm64 runner-packages-linux-x64], 'Use Linux artifacts from this run')
   downloads.each do |download|
     config = download.fetch('with')
     assert(config['path'] == 'images/runner-packages' && !config.key?('run-id') && !config.key?('repository'), 'Keep package downloads scoped to this run and build context')

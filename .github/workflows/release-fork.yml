@@ -10,6 +10,9 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
+      artifact_prefix:
+        default: runner-packages
+        type: string
       image_name:
         default: ''
         type: string
@@ -218,7 +221,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: runner-packages-${{ matrix.runtime }}
+          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-${{ matrix.runtime }}
           path: |
             _package
 
@@ -237,27 +240,27 @@ jobs:
       - name: Download Artifact (osx-x64)
         uses: actions/download-artifact@v5
         with:
-          name: runner-packages-osx-x64
+          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-osx-x64
           path: ./
       - name: Download Artifact (osx-arm64)
         uses: actions/download-artifact@v5
         with:
-          name: runner-packages-osx-arm64
+          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-osx-arm64
           path: ./
       - name: Download Artifact (linux-x64)
         uses: actions/download-artifact@v5
         with:
-          name: runner-packages-linux-x64
+          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-x64
           path: ./
       - name: Download Artifact (linux-arm)
         uses: actions/download-artifact@v5
         with:
-          name: runner-packages-linux-arm
+          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-arm
           path: ./
       - name: Download Artifact (linux-arm64)
         uses: actions/download-artifact@v5
         with:
-          name: runner-packages-linux-arm64
+          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-arm64
           path: ./
 
       - name: Validate Packages HASH
@@ -326,13 +329,13 @@ jobs:
       - name: Download this run's Linux x64 package
         uses: actions/download-artifact@v5
         with:
-          name: runner-packages-linux-x64
+          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-x64
           path: images/runner-packages
 
       - name: Download this run's Linux arm64 package
         uses: actions/download-artifact@v5
         with:
-          name: runner-packages-linux-arm64
+          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-arm64
           path: images/runner-packages
 
       - name: Setup Docker buildx

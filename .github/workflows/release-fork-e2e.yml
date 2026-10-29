@@ -40,6 +40,7 @@ jobs:
       packages: write
     uses: ./.github/workflows/release-fork.yml
     with:
+      artifact_prefix: e2e-new-release-packages
       image_name: ${{ needs.settings.outputs.image_name }}
       prerelease: true
       release_tag_prefix: ${{ needs.settings.outputs.release_tag_prefix }}
@@ -113,6 +114,7 @@ jobs:
       packages: write
     uses: ./.github/workflows/release-fork.yml
     with:
+      artifact_prefix: e2e-image-only-packages
       image_name: ${{ needs.settings.outputs.image_name }}
       prerelease: true
       release_tag_prefix: ${{ needs.settings.outputs.release_tag_prefix }}
