@@ -10,9 +10,6 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
-      artifact_prefix:
-        default: runner-packages
-        type: string
       image_name:
         default: ''
         type: string
@@ -21,6 +18,9 @@ on:
         type: boolean
       release_tag_prefix:
         default: v
+        type: string
+      runner_version:
+        default: ''
         type: string
       source_branch:
         default: main
@@ -119,16 +119,22 @@ jobs:
         id: check_version
         env:
           RELEASE_TAG_PREFIX: ${{ inputs.release_tag_prefix || 'v' }}
+          RUNNER_VERSION: ${{ inputs.runner_version }}
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const latestRelease = await github.rest.repos.getLatestRelease({
-              owner: 'actions',
-              repo: 'runner'
-            });
-
-            const runnerVersion = latestRelease.data.tag_name.replace(/^v/, '');
+            let runnerVersion = process.env.RUNNER_VERSION || '';
+            if (!runnerVersion) {
+              const latestRelease = await github.rest.repos.getLatestRelease({
+                owner: 'actions',
+                repo: 'runner'
+              });
+              runnerVersion = latestRelease.data.tag_name.replace(/^v/, '');
+            }
+            if (!/^\d+\.\d+\.\d+$/.test(runnerVersion)) {
+              throw new Error(`Invalid stable runner version: ${runnerVersion}`);
+            }
             console.log(`Latest runner version: ${runnerVersion}`);
             core.setOutput('version', runnerVersion);
             const releaseTag = `${process.env.RELEASE_TAG_PREFIX || 'v'}${runnerVersion}`;
@@ -170,10 +176,15 @@ jobs:
     needs: [check, merge-upstream]
     if: needs.check.outputs.should_build == 'true'
     outputs:
+      linux-x64-artifact-id: ${{ steps.artifact.outputs.linux-x64-artifact-id }}
       linux-x64-sha: ${{ steps.sha.outputs.linux-x64-sha256 }}
+      linux-arm64-artifact-id: ${{ steps.artifact.outputs.linux-arm64-artifact-id }}
       linux-arm64-sha: ${{ steps.sha.outputs.linux-arm64-sha256 }}
+      linux-arm-artifact-id: ${{ steps.artifact.outputs.linux-arm-artifact-id }}
       linux-arm-sha: ${{ steps.sha.outputs.linux-arm-sha256 }}
+      osx-x64-artifact-id: ${{ steps.artifact.outputs.osx-x64-artifact-id }}
       osx-x64-sha: ${{ steps.sha.outputs.osx-x64-sha256 }}
+      osx-arm64-artifact-id: ${{ steps.artifact.outputs.osx-arm64-artifact-id }}
       osx-arm64-sha: ${{ steps.sha.outputs.osx-arm64-sha256 }}
     strategy:
       matrix: ${{ fromJSON(needs.check.outputs.build_matrix) }}
@@ -218,12 +229,21 @@ jobs:
 
       # Upload runner package tar.gz/zip as artifact.
       - name: Publish Artifact
+        id: upload
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-${{ matrix.runtime }}
+          name: runner-packages-${{ matrix.runtime }}
           path: |
             _package
+
+      - name: Record this build's artifact ID
+        id: artifact
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          test -n "$ARTIFACT_ID"
+          echo "${{ matrix.runtime }}-artifact-id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
 
   release:
     if: needs.check.outputs.should_release == 'true'
@@ -240,27 +260,32 @@ jobs:
       - name: Download Artifact (osx-x64)
         uses: actions/download-artifact@v5
         with:
-          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-osx-x64
+          artifact-ids: ${{ needs.build.outputs.osx-x64-artifact-id }}
+          merge-multiple: true
           path: ./
       - name: Download Artifact (osx-arm64)
         uses: actions/download-artifact@v5
         with:
-          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-osx-arm64
+          artifact-ids: ${{ needs.build.outputs.osx-arm64-artifact-id }}
+          merge-multiple: true
           path: ./
       - name: Download Artifact (linux-x64)
         uses: actions/download-artifact@v5
         with:
-          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-x64
+          artifact-ids: ${{ needs.build.outputs.linux-x64-artifact-id }}
+          merge-multiple: true
           path: ./
       - name: Download Artifact (linux-arm)
         uses: actions/download-artifact@v5
         with:
-          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-arm
+          artifact-ids: ${{ needs.build.outputs.linux-arm-artifact-id }}
+          merge-multiple: true
           path: ./
       - name: Download Artifact (linux-arm64)
         uses: actions/download-artifact@v5
         with:
-          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-arm64
+          artifact-ids: ${{ needs.build.outputs.linux-arm64-artifact-id }}
+          merge-multiple: true
           path: ./
 
       - name: Validate Packages HASH
@@ -329,13 +354,15 @@ jobs:
       - name: Download this run's Linux x64 package
         uses: actions/download-artifact@v5
         with:
-          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-x64
+          artifact-ids: ${{ needs.build.outputs.linux-x64-artifact-id }}
+          merge-multiple: true
           path: images/runner-packages
 
       - name: Download this run's Linux arm64 package
         uses: actions/download-artifact@v5
         with:
-          name: ${{ inputs.artifact_prefix || 'runner-packages' }}-linux-arm64
+          artifact-ids: ${{ needs.build.outputs.linux-arm64-artifact-id }}
+          merge-multiple: true
           path: images/runner-packages
 
       - name: Setup Docker buildx

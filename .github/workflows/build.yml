@@ -26,6 +26,9 @@ jobs:
       run: ruby .github/scripts/test-release-source.rb
 
   build:
+    outputs:
+      linux-arm64-artifact-id: ${{ steps.artifact.outputs.linux-arm64-artifact-id }}
+      linux-x64-artifact-id: ${{ steps.artifact.outputs.linux-x64-artifact-id }}
     strategy:
       matrix:
         runtime: [ linux-x64, linux-arm64, linux-arm, osx-x64, osx-arm64 ]
@@ -76,12 +79,22 @@ jobs:
 
     # Upload runner package tar.gz/zip as artifact
     - name: Publish Artifact
+      id: upload
       if: github.event_name != 'pull_request' || matrix.runtime == 'linux-x64' || matrix.runtime == 'linux-arm64'
       uses: actions/upload-artifact@v7
       with:
         name: runner-package-${{ matrix.runtime }}
         path: |
           _package
+
+    - name: Record this build's artifact ID
+      id: artifact
+      if: github.event_name != 'pull_request' || matrix.runtime == 'linux-x64' || matrix.runtime == 'linux-arm64'
+      env:
+        ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+      run: |
+        test -n "$ARTIFACT_ID"
+        echo "${{ matrix.runtime }}-artifact-id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
 
   docker:
     needs: build
@@ -102,7 +115,8 @@ jobs:
     - name: Download the package built by this run
       uses: actions/download-artifact@v5
       with:
-        name: runner-package-${{ matrix.runtime }}
+        artifact-ids: ${{ needs.build.outputs[format('{0}-artifact-id', matrix.runtime)] }}
+        merge-multiple: true
         path: images/runner-packages
 
     - name: Read package version and checksum

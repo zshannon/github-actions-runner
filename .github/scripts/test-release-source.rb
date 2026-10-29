@@ -148,7 +148,7 @@ Dir.mktmpdir('runner-source-') do |tmp|
 
   check_script = render(step('check', 'check_version').fetch('with').fetch('script'),
                         'github.repository_owner' => 'fixture', 'github.event.repository.name' => 'runner')
-  plan = lambda do |event, release_status, succeeds = true|
+  plan = lambda do |event, release_status, succeeds = true, runner_version = ''|
     js = <<~JS
       const context = { eventName: #{event.to_json} };
       const core = { setOutput: (key, value) => { outputs[key] = value; } };
@@ -165,11 +165,15 @@ Dir.mktmpdir('runner-source-') do |tmp|
         .then(() => process.stdout.write(JSON.stringify(outputs)))
         .catch(error => { console.error(error); process.exitCode = 1; });
     JS
-    output = command(ENV.fetch('NODE', 'node'), '-e', js, dir: tmp, success: succeeds)
+    output = command(ENV.fetch('NODE', 'node'), '-e', js, dir: tmp, env: { 'RUNNER_VERSION' => runner_version }, success: succeeds)
     succeeds ? JSON.parse(output) : nil
   end
   [403, 500].each { |status| plan.call('schedule', status, false) }
   puts 'PASS: release API failures stay failures rather than becoming no-op or publishing decisions'
+  pinned = plan.call('push', 200, true, '1.2.4')
+  assert(pinned['version'] == '1.2.4' && pinned['release_tag'] == 'v1.2.4', 'Image-only verification uses the version published by its first call')
+  plan.call('push', 200, false, 'invalid-version')
+  puts 'PASS: verification can pin an existing stable version and rejects invalid version input'
 
   [ ['schedule', 200, false, false], ['schedule', 404, true, true],
     ['push', 200, true, false], ['workflow_dispatch', 200, true, false], ['push', 404, true, true] ].each do |event, status, should_build, should_release|
@@ -198,10 +202,11 @@ Dir.mktmpdir('runner-source-') do |tmp|
 
   image = JOBS.fetch('publish-image')
   downloads = image.fetch('steps').select { |s| s['uses'].to_s.start_with?('actions/download-artifact@') }
-  assert(downloads.map { |s| s['with']['name'].sub("${{ inputs.artifact_prefix || 'runner-packages' }}", 'runner-packages') }.sort == %w[runner-packages-linux-arm64 runner-packages-linux-x64], 'Use Linux artifacts from this run')
+  expected_artifacts = %w[linux-arm64 linux-x64].map { |runtime| "${{ needs.build.outputs.#{runtime}-artifact-id }}" }
+  assert(downloads.map { |s| s['with']['artifact-ids'] }.sort == expected_artifacts, 'Download the exact artifacts uploaded by these builds')
   downloads.each do |download|
     config = download.fetch('with')
-    assert(config['path'] == 'images/runner-packages' && !config.key?('run-id') && !config.key?('repository'), 'Keep package downloads scoped to this run and build context')
+    assert(config['path'] == 'images/runner-packages' && config['merge-multiple'] == true && !config.key?('name') && !config.key?('run-id') && !config.key?('repository'), 'Keep package downloads scoped to this run and build context')
   end
   build = step('publish-image', 'build-and-push').fetch('with')
   assert(build['context'] == './images', 'Image must build from the pinned working tree')
@@ -210,6 +215,11 @@ Dir.mktmpdir('runner-source-') do |tmp|
   %w[ARM64 X64].each { |arch| assert(build['build-args'].include?("RUNNER_PACKAGE_SHA256_#{arch}=${{ needs.build.outputs.linux-#{arch.downcase}-sha }}"), 'Package digest must come from this build') }
   assert(build['build-args'].include?('VERIFY_RUNNER_PACKAGE=true'), 'Published images must verify their packages')
   assert(build['build-args'].include?('RUNNER_PACKAGE_SOURCE=local'), 'Never download an older release package for publication')
+  JOBS.fetch('release').fetch('steps').select { |s| s['uses'].to_s.start_with?('actions/download-artifact@') }.each do |download|
+    config = download.fetch('with')
+    assert(config['artifact-ids'].match?(/\A\$\{\{ needs\.build\.outputs\.(?:linux|osx)-(?:arm|arm64|x64)-artifact-id \}\}\z/), 'Release assets come from exact uploaded artifact IDs')
+    assert(config['merge-multiple'] == true && !config.key?('name'), 'Release retries must not download an older artifact by name')
+  end
   puts 'PASS: images consume this run\'s artifacts and identify the merged source'
 
   dockerfile = File.read(ENV.fetch('RUNNER_DOCKERFILE', "#{ROOT}/images/Dockerfile"))
