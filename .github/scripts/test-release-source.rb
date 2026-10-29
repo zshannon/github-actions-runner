@@ -77,7 +77,7 @@ Dir.mktmpdir('runner-source-') do |tmp|
     File.write(yield_path, '')
     [checkout, yield_path, lambda do
       command('bash', '-e', '-o', 'pipefail', '-c', merge_script, dir: checkout,
-              env: { 'GITHUB_OUTPUT' => yield_path }, success: expected_success)
+              env: { 'GITHUB_OUTPUT' => yield_path, 'TARGET_BRANCH' => 'main' }, success: expected_success)
     end]
   end
 
@@ -124,9 +124,10 @@ Dir.mktmpdir('runner-source-') do |tmp|
   File.write("#{bin}/gh", "#!/usr/bin/env ruby\nrequire 'json'\nFile.write(ENV.fetch('GH_ARGS'), JSON.generate(ARGV))\n")
   File.chmod(0755, "#{bin}/gh")
   args_path = "#{tmp}/gh.json"
-  env = { 'GH_ARGS' => args_path, 'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'SOURCE_SHA' => source_sha }
+  env = { 'GH_ARGS' => args_path, 'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'SOURCE_SHA' => source_sha, 'RELEASE_TAG' => 'v1.2.3', 'PRERELEASE' => 'false' }
   command('bash', '-e', '-o', 'pipefail', '-c', release_script, dir: checkout, env: env)
   args = JSON.parse(File.read(args_path))
+  assert(!args.include?('--prerelease') && !args.include?('--latest=false'), 'Normal releases retain stable publication behavior')
   assert(args[args.index('--target') + 1] == source_sha && args.include?('--verify-tag'), 'Release must verify and target the merged commit')
   assert(git('rev-parse', 'v1.2.3', dir: origin) == source_sha, 'Release tag must point to the built commit')
   # Retry after tag creation is safe; an unrelated existing tag must be refused.
@@ -137,10 +138,17 @@ Dir.mktmpdir('runner-source-') do |tmp|
   assert(!File.exist?(args_path), 'A mismatched tag must stop before creating a release')
   assert(git('rev-parse', 'v1.2.3', dir: origin) == event_sha, 'Never overwrite an existing tag')
   puts 'PASS: release tags the selected commit; mismatched tags cannot be published or overwritten'
+  command('bash', '-e', '-o', 'pipefail', '-c', release_script, dir: checkout,
+          env: env.merge('PRERELEASE' => 'true', 'RELEASE_TAG' => 'e2e-fixture-v1.2.3'))
+  prerelease_args = JSON.parse(File.read(args_path))
+  assert(prerelease_args[2] == 'e2e-fixture-v1.2.3', 'Publishing verification uses an isolated tag')
+  assert(prerelease_args.include?('--prerelease') && prerelease_args.include?('--latest=false'), 'Publishing verification must not replace the latest stable release')
+  assert(git('rev-parse', 'e2e-fixture-v1.2.3', dir: origin) == source_sha, 'Verification tag points to the selected source')
+  puts 'PASS: publishing verification uses a distinct prerelease tag and never replaces stable latest'
 
   check_script = render(step('check', 'check_version').fetch('with').fetch('script'),
                         'github.repository_owner' => 'fixture', 'github.event.repository.name' => 'runner')
-  plan = lambda do |event, release_status, succeeds = true|
+  plan = lambda do |event, release_status, succeeds = true, runner_version = ''|
     js = <<~JS
       const context = { eventName: #{event.to_json} };
       const core = { setOutput: (key, value) => { outputs[key] = value; } };
@@ -157,11 +165,15 @@ Dir.mktmpdir('runner-source-') do |tmp|
         .then(() => process.stdout.write(JSON.stringify(outputs)))
         .catch(error => { console.error(error); process.exitCode = 1; });
     JS
-    output = command(ENV.fetch('NODE', 'node'), '-e', js, dir: tmp, success: succeeds)
+    output = command(ENV.fetch('NODE', 'node'), '-e', js, dir: tmp, env: { 'RUNNER_VERSION' => runner_version }, success: succeeds)
     succeeds ? JSON.parse(output) : nil
   end
   [403, 500].each { |status| plan.call('schedule', status, false) }
   puts 'PASS: release API failures stay failures rather than becoming no-op or publishing decisions'
+  pinned = plan.call('push', 200, true, '1.2.4')
+  assert(pinned['version'] == '1.2.4' && pinned['release_tag'] == 'v1.2.4', 'Image-only verification uses the version published by its first call')
+  plan.call('push', 200, false, 'invalid-version')
+  puts 'PASS: verification can pin an existing stable version and rejects invalid version input'
 
   [ ['schedule', 200, false, false], ['schedule', 404, true, true],
     ['push', 200, true, false], ['workflow_dispatch', 200, true, false], ['push', 404, true, true] ].each do |event, status, should_build, should_release|
@@ -190,10 +202,11 @@ Dir.mktmpdir('runner-source-') do |tmp|
 
   image = JOBS.fetch('publish-image')
   downloads = image.fetch('steps').select { |s| s['uses'].to_s.start_with?('actions/download-artifact@') }
-  assert(downloads.map { |s| s['with']['name'] }.sort == %w[runner-packages-linux-arm64 runner-packages-linux-x64], 'Use Linux artifacts from this run')
+  expected_artifacts = %w[linux-arm64 linux-x64].map { |runtime| "${{ needs.build.outputs.#{runtime}-artifact-id }}" }
+  assert(downloads.map { |s| s['with']['artifact-ids'] }.sort == expected_artifacts, 'Download the exact artifacts uploaded by these builds')
   downloads.each do |download|
     config = download.fetch('with')
-    assert(config['path'] == 'images/runner-packages' && !config.key?('run-id') && !config.key?('repository'), 'Keep package downloads scoped to this run and build context')
+    assert(config['path'] == 'images/runner-packages' && config['merge-multiple'] == true && !config.key?('name') && !config.key?('run-id') && !config.key?('repository'), 'Keep package downloads scoped to this run and build context')
   end
   build = step('publish-image', 'build-and-push').fetch('with')
   assert(build['context'] == './images', 'Image must build from the pinned working tree')
@@ -202,6 +215,11 @@ Dir.mktmpdir('runner-source-') do |tmp|
   %w[ARM64 X64].each { |arch| assert(build['build-args'].include?("RUNNER_PACKAGE_SHA256_#{arch}=${{ needs.build.outputs.linux-#{arch.downcase}-sha }}"), 'Package digest must come from this build') }
   assert(build['build-args'].include?('VERIFY_RUNNER_PACKAGE=true'), 'Published images must verify their packages')
   assert(build['build-args'].include?('RUNNER_PACKAGE_SOURCE=local'), 'Never download an older release package for publication')
+  JOBS.fetch('release').fetch('steps').select { |s| s['uses'].to_s.start_with?('actions/download-artifact@') }.each do |download|
+    config = download.fetch('with')
+    assert(config['artifact-ids'].match?(/\A\$\{\{ needs\.build\.outputs\.(?:linux|osx)-(?:arm|arm64|x64)-artifact-id \}\}\z/), 'Release assets come from exact uploaded artifact IDs')
+    assert(config['merge-multiple'] == true && !config.key?('name'), 'Release retries must not download an older artifact by name')
+  end
   puts 'PASS: images consume this run\'s artifacts and identify the merged source'
 
   dockerfile = File.read(ENV.fetch('RUNNER_DOCKERFILE', "#{ROOT}/images/Dockerfile"))
@@ -254,4 +272,56 @@ Dir.mktmpdir('runner-source-') do |tmp|
   attest = step('publish-image', 'Generate attestation').fetch('with')
   assert(attest['predicate'] == '${{ steps.source-provenance.outputs.predicate }}', 'Sign the source-aware predicate')
   puts 'PASS: signed provenance distinguishes workflow revision from merged source'
+
+
+  # A real upstream version bump must merge with the fork's package inputs.
+  # Keep the upstream declaration order in the common ancestor so reordering
+  # those lines in the fork reproduces the production conflict.
+  versions = dockerfile.scan(/^ARG (DOCKER_VERSION|BUILDX_VERSION)=(.+)$/).to_h
+  upstream_header = <<~DOCKER
+    # Source: https://github.com/dotnet/dotnet-docker
+    FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-noble AS build
+
+    ARG TARGETOS
+    ARG TARGETARCH
+    ARG RUNNER_VERSION
+    ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
+    ARG DOCKER_VERSION=#{versions.fetch('DOCKER_VERSION')}
+    ARG BUILDX_VERSION=#{versions.fetch('BUILDX_VERSION')}
+
+  DOCKER
+  upstream_body = dockerfile[dockerfile.index('RUN apt update')..-1].lines.reject do |line|
+    line.match?(/^ARG (?:RUNNER_PACKAGE_SHA256_|RUNNER_PACKAGE_SOURCE|RUNNER_REPOSITORY|VERIFY_RUNNER_PACKAGE)/)
+  end.join
+  docker_base = upstream_header + upstream_body
+  vendor, docker_origin, docker_upstream, docker_fork = %w[vendor docker-origin docker-upstream docker-fork].map { |name| "#{tmp}/#{name}" }
+  FileUtils.mkdir_p(vendor)
+  git('init', '-b', 'main', dir: vendor)
+  commit(vendor, '.github/workflows/fixture.yml', 'fork workflow')
+  commit(vendor, 'images/Dockerfile', docker_base)
+  git('clone', '--bare', vendor, docker_origin, dir: tmp)
+  git('clone', '--bare', vendor, docker_upstream, dir: tmp)
+  git('clone', docker_origin, docker_fork, dir: tmp)
+  commit(docker_fork, 'images/Dockerfile', dockerfile)
+  git('push', 'origin', 'main', dir: docker_fork)
+  versions.each do |key, value|
+    docker_base = docker_base.sub("ARG #{key}=#{value}", "ARG #{key}=#{value.sub(/\d+$/) { |n| (n.to_i + 1).to_s }}")
+  end
+  commit(vendor, 'images/Dockerfile', docker_base)
+  git('push', docker_upstream, 'main', dir: vendor)
+  merge_output = "#{tmp}/docker-merge.output"
+  File.write(merge_output, '')
+  script = merge_step.fetch('run').gsub('https://github.com/falcondev-oss/github-actions-runner', docker_upstream)
+  command('bash', '-e', '-o', 'pipefail', '-c', script, dir: docker_fork, env: { 'GITHUB_OUTPUT' => merge_output, 'TARGET_BRANCH' => 'main' })
+  merged_dockerfile = File.read("#{docker_fork}/images/Dockerfile")
+  versions.each do |key, value|
+    updated = value.sub(/\d+$/) { |n| (n.to_i + 1).to_s }
+    assert(merged_dockerfile.include?("ARG #{key}=#{updated}"), 'Accept upstream Docker and Buildx versions')
+  end
+  %w[RUNNER_PACKAGE_SHA256_ARM64 RUNNER_PACKAGE_SHA256_X64 RUNNER_PACKAGE_SOURCE RUNNER_REPOSITORY VERIFY_RUNNER_PACKAGE].each do |key|
+    assert(merged_dockerfile.match?(/^ARG #{key}(?:=|$)/), 'Retain the fork package inputs')
+  end
+  assert(merged_dockerfile.include?('local) cp'), 'Retain same-run package consumption')
+  assert(File.read(merge_output).strip == "source_sha=#{git('rev-parse', 'HEAD', dir: docker_fork)}", 'Export the merged Docker update source')
+  puts 'PASS: upstream Docker/Buildx version bumps merge cleanly and preserve fork package handling'
 end
